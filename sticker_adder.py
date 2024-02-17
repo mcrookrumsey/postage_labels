@@ -43,11 +43,9 @@ UPLOAD_FORM = """
 </html>
 """
 
-
 @app.route('/', methods=['GET'])
 def form():
     return render_template_string(UPLOAD_FORM)
-
 
 @app.route('/', methods=['POST'])
 def upload_pdf():
@@ -58,76 +56,71 @@ def upload_pdf():
         return 'No selected file', 400
     
     try:
+        # Extract the original file name without the extension
+        original_name = file.filename.rsplit('.', 1)[0]
+        # Add the '_stickered' suffix and the '.pdf' extension
+        new_filename = f"{original_name}_stickered.pdf"
+        
         modified_pdf = process_pdf(file)
-        return send_file(modified_pdf, as_attachment=True, download_name='modified_pdf.pdf', mimetype='application/pdf')
+        return send_file(modified_pdf, as_attachment=True, download_name=new_filename, mimetype='application/pdf')
     except Exception as e:
         return str(e), 500
-    
-def combine_images_if_possible(images):
+
+def combine_images(images, a4_dims):
+    # Assumes images are all the same size and can be combined two per A4 page
     combined_images = []
-    i = 0
-    while i < len(images):
-        img = images[i]
+    for i in range(0, len(images), 2):
+        combined_img = Image.new("RGB", a4_dims, "white")
         if i + 1 < len(images):
-            # Create a new blank image with the same width and double the height
-            combined_img = Image.new("RGB", (img.width, img.height * 2), "white")
-            combined_img.paste(img, (0, 0))  # Paste the first image on top
-            combined_img.paste(images[i + 1], (0, img.height))  # Paste the second image on bottom
-            combined_images.append(combined_img)
-            i += 2  # Move to the next pair of images
+            # Resize images to fit A4 dimensions
+            top_image = images[i].resize((a4_dims[0], a4_dims[1] // 2))
+            bottom_image = images[i + 1].resize((a4_dims[0], a4_dims[1] // 2))
+            combined_img.paste(top_image, (0, 0))
+            combined_img.paste(bottom_image, (0, a4_dims[1] // 2))
         else:
-            combined_images.append(img)  # If an odd number of images, add the last image as is
-            break
+            # If an odd number of images, add the last image to the top half
+            top_image = images[i].resize((a4_dims[0], a4_dims[1] // 2))
+            combined_img.paste(top_image, (0, 0))
+        combined_images.append(combined_img)
     return combined_images
 
 def process_pdf(pdf_file):
-    # Load the predetermined sticker
     sticker_path = 'static/images/sticker.jpg'
     sticker_image = Image.open(sticker_path)
     resized_sticker = sticker_image.resize((int(sticker_image.width * 2.55), int(sticker_image.height * 2.55)), Image.Resampling.LANCZOS)
 
+    images = []
     output = io.BytesIO()
     writer = fitz.open()
 
     doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
     for page_num in range(len(doc)):
-        page_img = convert_pdf_page_to_image(doc, page_num)
-        
-        # Calculate the new height for the cropped area (top half)
+        page_img = convert_pdf_page_to_image(doc, page_num, 300)
         new_height = page_img.height // 2
-        
-        # Crop the top half of the page
         top_half_img = page_img.crop((0, 0, page_img.width, new_height))
-        
-        # Create a new blank image with the same dimensions as the original page
-        blank_img = Image.new("RGB", (page_img.width, page_img.height), "white")
-        
-        # Paste the cropped top half onto the blank image
-        blank_img.paste(top_half_img, (0, 0))
-        
-        # Paste the sticker onto the composite image
-        # Note: Adjust x, y for sticker placement if necessary
-        x, y = 1275, 55  # These coordinates might need adjustment
-        blank_img.paste(resized_sticker, (x, y), resized_sticker.convert('RGBA'))
+        x, y = 1275, 55  # Adjust sticker placement as necessary
+        top_half_img.paste(resized_sticker, (x, y), resized_sticker.convert('RGBA'))
+        images.append(top_half_img)
 
-        # Convert the PIL Image back to a fitz Pixmap and insert into the new PDF
+    # A4 dimensions at 300 DPI
+    a4_dims = (2480, 3508)  # This might need to be adjusted if DPI is different
+    combined_images = combine_images(images, a4_dims)
+
+    for img in combined_images:
         img_bytes = io.BytesIO()
-        blank_img.save(img_bytes, format='PNG')
+        img.save(img_bytes, format='PNG')
         img_bytes.seek(0)
         pix = fitz.Pixmap(img_bytes)
         new_page = writer.new_page(width=pix.width, height=pix.height)
         new_page.insert_image(new_page.rect, pixmap=pix)
-    
+
     writer.save(output)
     writer.close()
-    
     output.seek(0)
     return output
 
-
-
 def convert_pdf_page_to_image(doc, page_number=0, dpi=300):
-    page = doc.load_page(page_number)  # 0-indexed
+    page = doc.load_page(page_number)
     zoom = dpi / 72
     mat = fitz.Matrix(zoom, zoom)
     pix = page.get_pixmap(matrix=mat)
